@@ -4,7 +4,7 @@
 use core::{future::Future, iter::zip};
 
 use crate::component;
-use embassy_futures::join::{join, join3, join4};
+use embassy_futures::join::{join3, join4};
 use embedded_cfu_protocol::protocol_definitions::*;
 use embedded_services::{error, intrusive_list, trace};
 
@@ -239,8 +239,9 @@ async fn map_slice_join<'i, 'o, I, O, F: Future<Output = Option<O>>>(
                 }
             }
             (Some((i0, o0)), Some((i1, o1)), None, None) => {
-                let results = join(f(i0), f(i1)).await;
-                if let (Some(r0), Some(r1)) = results {
+                let result_1 = f(i0).await;
+                let result_2 = f(i1).await;
+                if let (Some(r0), Some(r1)) = (result_1, result_2) {
                     *o0 = r0;
                     *o1 = r1;
                 } else {
