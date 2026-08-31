@@ -3,10 +3,15 @@
 
 use core::{future::Future, iter::zip};
 
-use crate::component;
 use embassy_futures::join::{join3, join4};
 use embedded_cfu_protocol::protocol_definitions::*;
-use embedded_services::{error, intrusive_list, trace};
+use embedded_services::{
+    cfu::{
+        self,
+        component::{CfuDevice, InternalResponseData, RequestData},
+    },
+    error, intrusive_list, trace,
+};
 
 /// Trait containing customization functionality for [`Splitter`]
 pub trait Customization {
@@ -23,7 +28,7 @@ pub trait Customization {
 /// Splitter struct
 pub struct Splitter<'a, C: Customization> {
     /// CFU device
-    cfu_device: component::CfuDevice,
+    cfu_device: CfuDevice,
     /// Component ID for each individual device
     devices: &'a [ComponentId],
     /// Customization for the Splitter
@@ -40,7 +45,7 @@ impl<'a, C: Customization> Splitter<'a, C> {
             None
         } else {
             Some(Self {
-                cfu_device: component::CfuDevice::new(component_id),
+                cfu_device: CfuDevice::new(component_id),
                 devices,
                 customization,
             })
@@ -48,17 +53,15 @@ impl<'a, C: Customization> Splitter<'a, C> {
     }
 
     /// Process a fw version request
-    async fn process_get_fw_version(&self, cfu_client: &crate::CfuClient) -> component::InternalResponseData {
+    async fn process_get_fw_version(&self) -> InternalResponseData {
         let mut versions = [GetFwVersionResponse {
             header: Default::default(),
             component_info: Default::default(),
         }; MAX_SUPPORTED_DEVICES];
 
         let success = map_slice_join(self.devices, &mut versions, |device_id| async move {
-            if let Ok(component::InternalResponseData::FwVersionResponse(version_info)) = cfu_client
-                .context
-                .route_request(*device_id, component::RequestData::FwVersionRequest)
-                .await
+            if let Ok(InternalResponseData::FwVersionResponse(version_info)) =
+                cfu::route_request(*device_id, RequestData::FwVersionRequest).await
             {
                 Some(version_info)
             } else {
@@ -73,18 +76,14 @@ impl<'a, C: Customization> Splitter<'a, C> {
 
             // The overall component version comes first
             overall_version.component_info[0].component_id = self.cfu_device.component_id();
-            component::InternalResponseData::FwVersionResponse(overall_version)
+            InternalResponseData::FwVersionResponse(overall_version)
         } else {
             crate::responses::create_invalid_fw_version_response(self.cfu_device.component_id())
         }
     }
 
     /// Process a give offer request
-    async fn process_give_offer(
-        &self,
-        offer: &FwUpdateOffer,
-        cfu_client: &crate::CfuClient,
-    ) -> component::InternalResponseData {
+    async fn process_give_offer(&self, offer: &FwUpdateOffer) -> InternalResponseData {
         let mut offer_responses = [FwUpdateOfferResponse::default(); MAX_SUPPORTED_DEVICES];
 
         let success = map_slice_join(self.devices, &mut offer_responses, |device_id| async move {
@@ -92,10 +91,8 @@ impl<'a, C: Customization> Splitter<'a, C> {
 
             // Override with the correct component ID for the device
             offer.component_info.component_id = *device_id;
-            if let Ok(component::InternalResponseData::OfferResponse(response)) = cfu_client
-                .context
-                .route_request(*device_id, component::RequestData::GiveOffer(offer))
-                .await
+            if let Ok(InternalResponseData::OfferResponse(response)) =
+                cfu::route_request(*device_id, RequestData::GiveOffer(offer)).await
             {
                 Some(response)
             } else {
@@ -106,27 +103,19 @@ impl<'a, C: Customization> Splitter<'a, C> {
         .await;
 
         if success && let Some(offer_responses_slice) = offer_responses.get(..self.devices.len()) {
-            component::InternalResponseData::OfferResponse(
-                self.customization.resolve_offer_response(offer_responses_slice),
-            )
+            InternalResponseData::OfferResponse(self.customization.resolve_offer_response(offer_responses_slice))
         } else {
             crate::responses::create_invalid_fw_version_response(self.cfu_device.component_id())
         }
     }
 
     /// Process update content
-    async fn process_give_content(
-        &self,
-        content: &FwUpdateContentCommand,
-        cfu_client: &crate::CfuClient,
-    ) -> component::InternalResponseData {
+    async fn process_give_content(&self, content: &FwUpdateContentCommand) -> InternalResponseData {
         let mut content_responses = [FwUpdateContentResponse::default(); MAX_SUPPORTED_DEVICES];
 
         let success = map_slice_join(self.devices, &mut content_responses, |device_id| async move {
-            if let Ok(component::InternalResponseData::ContentResponse(response)) = cfu_client
-                .context
-                .route_request(*device_id, component::RequestData::GiveContent(*content))
-                .await
+            if let Ok(InternalResponseData::ContentResponse(response)) =
+                cfu::route_request(*device_id, RequestData::GiveContent(*content)).await
             {
                 Some(response)
             } else {
@@ -137,63 +126,57 @@ impl<'a, C: Customization> Splitter<'a, C> {
         .await;
 
         if success && let Some(content_responses_slice) = content_responses.get(..self.devices.len()) {
-            component::InternalResponseData::ContentResponse(
-                self.customization.resolve_content_response(content_responses_slice),
-            )
+            InternalResponseData::ContentResponse(self.customization.resolve_content_response(content_responses_slice))
         } else {
             crate::responses::create_content_rejection(content.header.sequence_num)
         }
     }
 
     /// Wait for a CFU message
-    pub async fn wait_request(&self) -> component::RequestData {
+    pub async fn wait_request(&self) -> RequestData {
         self.cfu_device.wait_request().await
     }
 
     /// Process a CFU message and produce a response
-    pub async fn process_request(
-        &self,
-        request: component::RequestData,
-        cfu_client: &crate::CfuClient,
-    ) -> component::InternalResponseData {
+    pub async fn process_request(&self, request: RequestData) -> InternalResponseData {
         match request {
-            component::RequestData::FwVersionRequest => {
+            RequestData::FwVersionRequest => {
                 trace!("Got FwVersionRequest");
-                self.process_get_fw_version(cfu_client).await
+                self.process_get_fw_version().await
             }
-            component::RequestData::GiveOffer(offer) => {
+            RequestData::GiveOffer(offer) => {
                 trace!("Got GiveOffer");
-                self.process_give_offer(&offer, cfu_client).await
+                self.process_give_offer(&offer).await
             }
-            component::RequestData::GiveContent(content) => {
+            RequestData::GiveContent(content) => {
                 trace!("Got GiveContent");
-                self.process_give_content(&content, cfu_client).await
+                self.process_give_content(&content).await
             }
-            component::RequestData::AbortUpdate => {
+            RequestData::AbortUpdate => {
                 trace!("Got AbortUpdate");
-                component::InternalResponseData::ComponentPrepared
+                InternalResponseData::ComponentPrepared
             }
-            component::RequestData::FinalizeUpdate => {
+            RequestData::FinalizeUpdate => {
                 trace!("Got FinalizeUpdate");
-                component::InternalResponseData::ComponentPrepared
+                InternalResponseData::ComponentPrepared
             }
-            component::RequestData::PrepareComponentForUpdate => {
+            RequestData::PrepareComponentForUpdate => {
                 trace!("Got PrepareComponentForUpdate");
-                component::InternalResponseData::ComponentPrepared
+                InternalResponseData::ComponentPrepared
             }
-            component::RequestData::GiveOfferExtended(_) => {
+            RequestData::GiveOfferExtended(_) => {
                 trace!("Got GiveExtendedOffer");
                 // Extended offers are not currently supported
-                component::InternalResponseData::OfferResponse(FwUpdateOfferResponse::new_with_failure(
+                InternalResponseData::OfferResponse(FwUpdateOfferResponse::new_with_failure(
                     HostToken::Driver,
                     OfferRejectReason::InvalidComponent,
                     OfferStatus::Reject,
                 ))
             }
-            component::RequestData::GiveOfferInformation(_) => {
+            RequestData::GiveOfferInformation(_) => {
                 trace!("Got GiveOfferInformation");
                 // Offer information is not currently supported
-                component::InternalResponseData::OfferResponse(FwUpdateOfferResponse::new_with_failure(
+                InternalResponseData::OfferResponse(FwUpdateOfferResponse::new_with_failure(
                     HostToken::Driver,
                     OfferRejectReason::InvalidComponent,
                     OfferStatus::Reject,
@@ -203,12 +186,12 @@ impl<'a, C: Customization> Splitter<'a, C> {
     }
 
     /// Send a response to the CFU message
-    pub async fn send_response(&self, response: component::InternalResponseData) {
+    pub async fn send_response(&self, response: InternalResponseData) {
         self.cfu_device.send_response(response).await;
     }
 
-    pub fn register(&'static self, cfu_client: &crate::CfuClient) -> Result<(), intrusive_list::Error> {
-        cfu_client.context.register_device(&self.cfu_device)
+    pub async fn register(&'static self) -> Result<(), intrusive_list::Error> {
+        cfu::register_device(&self.cfu_device).await
     }
 }
 
@@ -239,7 +222,8 @@ async fn map_slice_join<'i, 'o, I, O, F: Future<Output = Option<O>>>(
                 }
             }
             (Some((i0, o0)), Some((i1, o1)), None, None) => {
-                let result_1 = f(i0).await;
+                // let results = join(f(i0), f(i1)).await;
+                let result_1 =  f(i0).await;
                 let result_2 = f(i1).await;
                 if let (Some(r0), Some(r1)) = (result_1, result_2) {
                     *o0 = r0;
